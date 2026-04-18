@@ -4,7 +4,7 @@ import json
 import hashlib
 import requests
 import feedparser
-from datetime import datetime
+from datetime import datetime,timezone 
 
 # ── CONFIG ──────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
@@ -112,10 +112,10 @@ def format_signal(signal, title, source):
 
 💬 {reasoning}
 
-🕐 {datetime.utcnow().strftime('%H:%M UTC')}"""
+🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"""
 
 def check_feeds():
-    print(f"[{datetime.utcnow().strftime('%H:%M:%S')}] Checking feeds...")
+    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Checking feeds...")
     for feed_url in FEEDS:
         try:
             feed = feedparser.parse(feed_url)
