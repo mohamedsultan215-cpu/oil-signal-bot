@@ -4,152 +4,118 @@ import json
 import hashlib
 import requests
 import feedparser
-from datetime import datetime,timezone 
+from datetime import datetime, timezone
 
-# ── CONFIG ──────────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-CHECK_INTERVAL   = 60  # seconds between checks
+TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CHECK_INTERVAL    = 60
 
-# ── RSS FEEDS ────────────────────────────────────────────
 FEEDS = [
     "https://feeds.reuters.com/reuters/businessNews",
     "https://feeds.reuters.com/reuters/topNews",
-    "https://www.ft.com/rss/home",
     "https://feeds.bbci.co.uk/news/business/rss.xml",
-    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
 ]
 
-# ── KEYWORDS THAT TRIGGER ANALYSIS ──────────────────────
 KEYWORDS = [
-    "hormuz", "strait of hormuz",
-    "trump iran", "iran attack", "iran strike", "iran nuclear", "iran sanctions",
-    "iran oil", "iran military",
-    "opec", "opec+", "oil cut", "oil output", "production cut",
-    "crude oil", "brent", "oil price", "oil supply",
-    "houthi", "red sea attack", "red sea shipping",
-    "russia oil", "russian energy", "oil sanctions",
-    "saudi aramco", "saudi oil",
-    "oil tanker", "oil pipeline",
-    "israel iran", "middle east war", "persian gulf",
-    "eia report", "crude inventory", "oil stockpile",
-    "china oil", "china demand",
+    "hormuz", "iran", "opec", "crude oil", "brent", "oil price",
+    "houthi", "red sea", "russia oil", "saudi", "oil supply",
+    "oil production", "oil tanker", "trump iran", "oil sanctions",
 ]
 
-seen_articles = set()
+seen = set()
 
-def is_oil_relevant(title, summary=""):
+def log(msg):
+    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}", flush=True)
+
+def is_relevant(title, summary=""):
     text = (title + " " + summary).lower()
-    return any(kw in text for kw in KEYWORDS)
+    return any(k in text for k in KEYWORDS)
 
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
+def send_telegram(msg):
     try:
-        requests.post(url, json=payload, timeout=10)
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=15)
+        if r.status_code != 200:
+            log(f"Telegram failed: {r.text[:200]}")
+        else:
+            log("Telegram message sent OK")
     except Exception as e:
-        print(f"Telegram error: {e}")
+        log(f"Telegram exception: {e}")
 
-def analyze_with_claude(title, summary, source):
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01"
-    }
-    body = {
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 400,
-        "system": """You are a senior oil markets trader. Analyze news and return ONLY raw JSON, no markdown.
-
-{
-  "action": "BUY" | "SELL" | "HOLD" | "WATCH",
-  "confidence": <0-100>,
-  "reasoning": "<2 sentences max>",
-  "brent_impact": "<e.g. +$3-5/bbl or neutral>",
-  "timeframe": "<e.g. 24-48 hours>"
-}""",
-        "messages": [{
-            "role": "user",
-            "content": f"SOURCE: {source}\nHEADLINE: {title}\nDETAILS: {summary[:500]}"
-        }]
-    }
+def analyze(title, summary, source):
     try:
-        res = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=body,
-            timeout=30
-        )
-        data = res.json()
-        text = data["content"][0]["text"].strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        headers = {
+            "content-type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01"
+        }
+        body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 300,
+            "system": "You are an oil markets trader. Respond ONLY with raw JSON, no markdown, no explanation.\n{\"action\":\"BUY|SELL|HOLD|WATCH\",\"confidence\":0-100,\"reasoning\":\"2 sentences\",\"brent_impact\":\"+/-$X/bbl\",\"timeframe\":\"X hours\"}",
+            "messages": [{"role": "user", "content": f"Headline: {title}\nSource: {source}\nDetails: {summary[:400]}"}]
+        }
+        r = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=30)
+        log(f"Anthropic status: {r.status_code}")
+        if r.status_code != 200:
+            log(f"Anthropic error body: {r.text[:300]}")
+            return None
+        data = r.json()
+        text = data["content"][0]["text"].strip().replace("```json","").replace("```","")
         return json.loads(text)
     except Exception as e:
-        print(f"Claude error: {e}")
+        log(f"Analyze exception: {e}")
         return None
 
-def format_signal(signal, title, source):
-    action = signal.get("action", "WATCH")
-    confidence = signal.get("confidence", 0)
-    reasoning = signal.get("reasoning", "")
-    brent = signal.get("brent_impact", "unknown")
-    timeframe = signal.get("timeframe", "unknown")
+def format_msg(signal, title, source):
+    icons = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡", "WATCH": "🔵"}
+    a = signal.get("action", "WATCH")
+    return (
+        f"{icons.get(a,'⚪')} <b>OIL SIGNAL: {a}</b>\n"
+        f"📰 {title}\n"
+        f"🏛 {source}\n\n"
+        f"🎯 Confidence: {signal.get('confidence')}%\n"
+        f"📈 Brent: {signal.get('brent_impact','?')}\n"
+        f"⏱ {signal.get('timeframe','?')}\n\n"
+        f"💬 {signal.get('reasoning','')}\n"
+        f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+    )
 
-    emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡", "WATCH": "🔵"}.get(action, "⚪")
-
-    return f"""{emoji} <b>OIL SIGNAL: {action}</b>
-📰 {title}
-🏛 {source}
-
-🎯 Confidence: {confidence}%
-📈 Brent impact: {brent}
-⏱ Timeframe: {timeframe}
-
-💬 {reasoning}
-
-🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"""
-
-def check_feeds():
-    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Checking feeds...")
-    for feed_url in FEEDS:
+def check():
+    log("Checking feeds...")
+    for url in FEEDS:
         try:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:10]:
+            feed = feedparser.parse(url)
+            src  = feed.feed.get("title", url)
+            for entry in feed.entries[:8]:
                 title   = entry.get("title", "")
                 summary = entry.get("summary", "")
                 link    = entry.get("link", "")
-                source  = feed.feed.get("title", feed_url)
-
-                article_id = hashlib.md5(link.encode()).hexdigest()
-                if article_id in seen_articles:
+                uid     = hashlib.md5(link.encode()).hexdigest()
+                if uid in seen:
                     continue
-                seen_articles.add(article_id)
-
-                if is_oil_relevant(title, summary):
-                    print(f"  ⚡ Relevant: {title[:60]}...")
-                    signal = analyze_with_claude(title, summary, source)
+                seen.add(uid)
+                if is_relevant(title, summary):
+                    log(f"Relevant: {title[:70]}")
+                    signal = analyze(title, summary, src)
                     if signal:
-                        msg = format_signal(signal, title, source)
-                        send_telegram(msg)
-                        print(f"  ✅ Signal sent: {signal.get('action')} ({signal.get('confidence')}%)")
-                        time.sleep(3)
+                        send_telegram(format_msg(signal, title, src))
+                        log(f"Sent: {signal.get('action')} {signal.get('confidence')}%")
+                    time.sleep(2)
         except Exception as e:
-            print(f"Feed error ({feed_url}): {e}")
+            log(f"Feed error: {e}")
 
 def main():
-    print("🛢 Oil Signal Bot started")
-    send_telegram("🛢 <b>Oil Signal Bot is now LIVE</b>\n\nMonitoring: Hormuz • Trump/Iran • OPEC • Red Sea • Russia • EIA\n\nYou'll get alerts here within 60 seconds of any major oil news.")
-    
-    # Keep seen_articles bounded
+    log("=== Oil Signal Bot starting ===")
+    log(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
+    log(f"TELEGRAM_CHAT_ID set: {bool(TELEGRAM_CHAT_ID)}")
+    log(f"ANTHROPIC_API_KEY set: {bool(ANTHROPIC_API_KEY)}")
+    send_telegram("Oil Signal Bot is LIVE - Monitoring oil news 24/7")
     while True:
-        check_feeds()
-        if len(seen_articles) > 1000:
-            seen_articles.clear()
+        check()
+        if len(seen) > 2000:
+            seen.clear()
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
