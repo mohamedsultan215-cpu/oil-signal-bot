@@ -4,8 +4,23 @@ import json
 import hashlib
 import requests
 import feedparser
+import threading
 from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# ── Dummy web server to satisfy Render free tier ──────────
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Oil Signal Bot is running")
+    def log_message(self, *args):
+        pass
+
+def start_web_server():
+    HTTPServer(("0.0.0.0", 10000), Handler).serve_forever()
+
+# ── Config ────────────────────────────────────────────────
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -59,7 +74,7 @@ def analyze(title, summary, source):
         r = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=30)
         log(f"Anthropic status: {r.status_code}")
         if r.status_code != 200:
-            log(f"Anthropic error body: {r.text[:300]}")
+            log(f"Anthropic error: {r.text[:300]}")
             return None
         data = r.json()
         text = data["content"][0]["text"].strip().replace("```json","").replace("```","")
@@ -111,7 +126,13 @@ def main():
     log(f"TELEGRAM_TOKEN set: {bool(TELEGRAM_TOKEN)}")
     log(f"TELEGRAM_CHAT_ID set: {bool(TELEGRAM_CHAT_ID)}")
     log(f"ANTHROPIC_API_KEY set: {bool(ANTHROPIC_API_KEY)}")
-    send_telegram("Oil Signal Bot is LIVE - Monitoring oil news 24/7")
+
+    # Start web server in background
+    threading.Thread(target=start_web_server, daemon=True).start()
+    log("Web server started on port 10000")
+
+    send_telegram("🛢 <b>Oil Signal Bot is LIVE</b>\n\nMonitoring oil news 24/7.\nYou'll get signals here within 60 seconds of major news.")
+
     while True:
         check()
         if len(seen) > 2000:
