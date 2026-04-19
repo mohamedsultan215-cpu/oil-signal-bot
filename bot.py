@@ -28,18 +28,24 @@ TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "")
 GOOGLE_CLIENT_EMAIL = os.environ.get("GOOGLE_CLIENT_EMAIL", "")
-GOOGLE_PRIVATE_KEY  = os.environ.get("GOOGLE_PRIVATE_KEY", "").replace("\\n", "\n")
+GOOGLE_PRIVATE_KEY  = os.environ.get("GOOGLE_PRIVATE_KEY", "").replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
 CHECK_INTERVAL    = 60
 MIN_CONFIDENCE    = 82
 
 # ── Google Sheets setup ────────────────────────────────────
 def get_sheets_service():
     try:
+        # Clean the private key — fix any formatting issues
+        private_key = GOOGLE_PRIVATE_KEY
+        if "\\n" in private_key:
+            private_key = private_key.replace("\\n", "\n")
+        if not private_key.startswith("-----BEGIN"):
+            private_key = private_key.replace(" ", "\n")
         credentials = service_account.Credentials.from_service_account_info(
             {
                 "type": "service_account",
                 "client_email": GOOGLE_CLIENT_EMAIL,
-                "private_key": GOOGLE_PRIVATE_KEY,
+                "private_key": private_key,
                 "token_uri": "https://oauth2.googleapis.com/token",
             },
             scopes=["https://www.googleapis.com/auth/spreadsheets"]
